@@ -333,20 +333,46 @@ function formatTime(seconds){
     return String(min).padStart(2,"0")+":"+String(sec).padStart(2,"0");
 }
 
+// 音声コンテキストは毎回作り直さず、スタート時のタップで有効化して使い回す
+let audioContext=null;
+function getAudioContext(){
+    const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+    if(!AudioContextClass)return null;
+    if(!audioContext||audioContext.state==="closed"){
+        audioContext=new AudioContextClass();
+    }
+    return audioContext;
+}
 function beep(frequency=700,duration=0.12){
-    const AudioContext=window.AudioContext||window.webkitAudioContext;
-    if(!AudioContext)return;
-    const ctx=new AudioContext();
-    const oscillator=ctx.createOscillator();
-    const gain=ctx.createGain();
-    oscillator.frequency.value=frequency;
-    oscillator.type="sine";
-    gain.gain.value=Number(volumeElement.value);
-    oscillator.connect(gain);
-    gain.connect(ctx.destination);
-    oscillator.start();
-    gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+duration);
-    oscillator.stop(ctx.currentTime+duration);
+    const ctx=getAudioContext();
+    if(!ctx)return;
+
+    const playTone=()=>{
+        if(ctx.state!=="running")return;
+        const oscillator=ctx.createOscillator();
+        const gain=ctx.createGain();
+        const now=ctx.currentTime;
+        const volume=Math.max(0.0001,Number(volumeElement.value));
+        oscillator.frequency.value=frequency;
+        oscillator.type="sine";
+        gain.gain.setValueAtTime(volume,now);
+        gain.gain.exponentialRampToValueAtTime(0.001,now+duration);
+        oscillator.connect(gain);
+        gain.connect(ctx.destination);
+        oscillator.start(now);
+        oscillator.stop(now+duration);
+        oscillator.addEventListener("ended",()=>{
+            oscillator.disconnect();
+            gain.disconnect();
+        },{once:true});
+    };
+
+    // モバイルブラウザーで一時停止状態になった場合も再開を試みる
+    if(ctx.state==="suspended"){
+        ctx.resume().then(playTone).catch(()=>{});
+    }else{
+        playTone();
+    }
 }
 
 function getCurrentState(){
