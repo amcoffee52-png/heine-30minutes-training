@@ -333,46 +333,95 @@ function formatTime(seconds){
     return String(min).padStart(2,"0")+":"+String(sec).padStart(2,"0");
 }
 
-// 音声コンテキストは毎回作り直さず、スタート時のタップで有効化して使い回す
+// スマホでも音声コンテキストを使い回し、停止・中断状態からの復帰を試みます。
 let audioContext=null;
 function getAudioContext(){
     const AudioContextClass=window.AudioContext||window.webkitAudioContext;
     if(!AudioContextClass)return null;
     if(!audioContext||audioContext.state==="closed"){
-        audioContext=new AudioContextClass();
+        try{ audioContext=new AudioContextClass(); }
+        catch(error){ return null; }
     }
     return audioContext;
 }
-function beep(frequency=700,duration=0.12){
-    const ctx=getAudioContext();
-    if(!ctx)return;
 
-    const playTone=()=>{
-        if(ctx.state!=="running")return;
+function resumeAudioContext(){
+    const ctx=getAudioContext();
+    if(!ctx)return null;
+    if(ctx.state!=="running"){
+        try{
+            const resumeResult=ctx.resume();
+            if(resumeResult&&typeof resumeResult.catch==="function"){
+                resumeResult.catch(()=>{});
+            }
+        }catch(error){ /* ブラウザーが再開を許可しない場合は次の操作で再試行 */ }
+    }
+    return ctx;
+}
+
+// タップ操作を音声の再有効化にも使います（音そのものは鳴らしません）。
+document.addEventListener("pointerdown",resumeAudioContext,{capture:true,passive:true});
+document.addEventListener("touchstart",resumeAudioContext,{capture:true,passive:true});
+document.addEventListener("visibilitychange",()=>{
+    if(!document.hidden&&audioContext&&audioContext.state!=="running"){
+        try{
+            const result=audioContext.resume();
+            if(result&&typeof result.catch==="function")result.catch(()=>{});
+        }catch(error){ /* 次のユーザー操作で再試行 */ }
+    }
+});
+
+function scheduleTone(ctx,frequency,startAt,duration){
+    if(!ctx||ctx.state!=="running")return;
+    try{
         const oscillator=ctx.createOscillator();
         const gain=ctx.createGain();
-        const now=ctx.currentTime;
-        const volume=Math.max(0.0001,Number(volumeElement.value));
+        const maxVolume=Math.min(1,Math.max(0,Number(volumeElement.value)||0));
+        const safeVolume=Math.max(0.0001,maxVolume);
         oscillator.frequency.value=frequency;
         oscillator.type="sine";
-        gain.gain.setValueAtTime(volume,now);
-        gain.gain.exponentialRampToValueAtTime(0.001,now+duration);
+        gain.gain.setValueAtTime(0.0001,startAt);
+        gain.gain.linearRampToValueAtTime(safeVolume,startAt+0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001,startAt+duration);
         oscillator.connect(gain);
         gain.connect(ctx.destination);
-        oscillator.start(now);
-        oscillator.stop(now+duration);
+        oscillator.start(startAt);
+        oscillator.stop(startAt+duration+0.015);
         oscillator.addEventListener("ended",()=>{
-            oscillator.disconnect();
-            gain.disconnect();
+            try{oscillator.disconnect();gain.disconnect();}catch(error){}
         },{once:true});
-    };
+    }catch(error){ /* 音声再生に失敗してもタイマー本体は継続 */ }
+}
 
-    // モバイルブラウザーで一時停止状態になった場合も再開を試みる
-    if(ctx.state==="suspended"){
-        ctx.resume().then(playTone).catch(()=>{});
-    }else{
-        playTone();
+function runWhenAudioReady(callback){
+    const ctx=resumeAudioContext();
+    if(!ctx)return;
+    if(ctx.state==="running"){
+        callback(ctx);
+        return;
     }
+    // resume() 完了後に再生。iOS Safariなどで中断中だった場合にも再試行します。
+    try{
+        const result=ctx.resume();
+        if(result&&typeof result.then==="function"){
+            result.then(()=>{
+                if(ctx.state==="running")callback(ctx);
+            }).catch(()=>{});
+        }
+    }catch(error){ /* 次の音またはユーザー操作で再試行 */ }
+}
+
+function beep(frequency=700,duration=0.12){
+    runWhenAudioReady(ctx=>scheduleTone(ctx,frequency,ctx.currentTime+0.015,duration));
+}
+
+// 種目の切り替わりは、通常のカウント音と区別しやすい2音にします。
+function transitionBeep(){
+    runWhenAudioReady(ctx=>{
+        const startAt=ctx.currentTime+0.02;
+        scheduleTone(ctx,900,startAt,0.12);
+        scheduleTone(ctx,1200,startAt+0.15,0.18);
+    });
 }
 
 function getCurrentState(){
@@ -596,6 +645,7 @@ function startTimer(){
         elapsed=0;
         updateDisplay();
     }
+    resumeAudioContext();
     running=true;
     startGif();
     showSpeech(getSpeechForState(getCurrentState()));
@@ -618,7 +668,7 @@ function startTimer(){
         }
 
         if(state.phase!==before.phase||state.index!==before.index){
-            beep(1000,0.18);
+            transitionBeep();
             showSpeech(getSpeechForState(state));
         }
 
